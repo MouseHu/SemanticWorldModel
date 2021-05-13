@@ -123,7 +123,6 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
     action, agent_state = agent(obs, done, agent_state)
     #NOTE: agent_state:(latent,action)
     action = np.array(action)
-    #print(action[0])
     assert len(action) == len(envs)
     # Step envs.
     promises = [e.step(a, blocking=False) for e, a in zip(envs, action)]
@@ -298,10 +297,13 @@ class OneHotDist:
     return self._one_hot(self._dist.mode())
 
   def sample(self, amount=None):
+    #FIXME:Does the way how it backwords meaningful?
     amount = [amount] if amount else []
     indices = self._dist.sample(*amount)
     sample = self._one_hot(indices)
+    #(batch,action_dim)
     probs = self._dist.probs_parameter()
+    #Here probs enable the BP process.
     sample += tf.cast(probs - tf.stop_gradient(probs), self._dtype)
     return sample
 
@@ -415,6 +417,7 @@ def args_type(default):
 
 
 def static_scan(fn, inputs, start, reverse=False):
+
   #对inputs做fn放到start里？
   last = start
   outputs = [[] for _ in tf.nest.flatten(start)]

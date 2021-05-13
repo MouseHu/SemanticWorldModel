@@ -12,7 +12,7 @@ NOTE: 需要增加的：
 - model方面：representation和 transition model需要增加description作为输入（认为state中间应该有description的信息）
 
 '''
-os.environ["CUDA_VISIBLE_DEVICES"] = '1,2'
+os.environ["CUDA_VISIBLE_DEVICES"] = '7'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['MUJOCO_GL'] = 'egl'
 
@@ -33,7 +33,7 @@ import wrappers
 from gridworld.collect_data import generate_models, desc2dict
 
 def config_gridworld():
-  #NOTE:CHANEG:new configuration for gridworld.
+  #NOTE:CHANEG:new configuration for gridworld
   config = tools.AttrDict()
   # General.
   config.logdir = pathlib.Path('.')
@@ -55,7 +55,7 @@ def config_gridworld():
   config.eval_noise = 0.0
   config.clip_rewards = 'none'
   # Model.
-  config.deter_size = 200
+  config.deter_size = 300#NOTE:add
   config.stoch_size = 30
   config.num_units = 400
   config.dense_act = 'elu'
@@ -70,14 +70,14 @@ def config_gridworld():
   config.weight_decay_pattern = r'.*'
   # Training.
   config.batch_size = 50
-  config.batch_length = 15
+  config.batch_length = 20
   config.train_every = 1000
   config.train_steps = 100
   config.pretrain = 100
-  config.model_lr = 6e-4
+  config.model_lr = 1e-4#NOTE:tune
   config.value_lr = 8e-5
   config.actor_lr = 8e-5
-  config.grad_clip = 100.0
+  config.grad_clip = 100.0#NOTE:tune
   config.dataset_balance = False
   # Behavior.
   config.discount = 0.99
@@ -204,24 +204,23 @@ class Dreamer(tools.Module):
 
   @tf.function
   def policy(self, obs, state, training):
+    #NOTE:add desc here
     '''
     p(a|s,a)
     '''
-    #TODO:add desc
-    
     if state is None:
       latent = self._dynamics.initial(len(obs['image']))
       action = tf.zeros((len(obs['image']), self._actdim), self._float)
     else:
       latent, action = state
     embed = self._encode(preprocess(obs, self._c))
-    latent, _ = self._dynamics.obs_step(latent, action, embed)
+    latent, _ = self._dynamics.obs_step(latent, action, embed, obs['desc'])
     feat = self._dynamics.get_feat(latent)
     if training:
       action = self._actor(feat).sample()
     else:
       action = self._actor(feat).mode()
-    #FIXME:action?
+    
     action = self.exploration(action, training)
     state = (latent, action)
     return action, state
@@ -236,10 +235,13 @@ class Dreamer(tools.Module):
 
   def _train(self, data, log_images):
     #(data)dict {'action'(25,50,6), 'reward', 'image' ...}
+    #NOTE:add desc
+    assert('desc' in data.keys())
+    #FIXME:check whether desc in data
     with tf.GradientTape() as model_tape:
       embed = self._encode(data)
       #(embed.shape)(25,50,1024)
-      post, prior = self._dynamics.observe(embed, data['action'])
+      post, prior = self._dynamics.observe(embed, data['action'], data['desc'])
       feat = self._dynamics.get_feat(post)
       #(feat)(25,50,230)
       image_pred = self._decode(feat)
@@ -265,7 +267,7 @@ class Dreamer(tools.Module):
       model_loss /= float(self._strategy.num_replicas_in_sync)
 
     with tf.GradientTape() as actor_tape:
-      imag_feat = self._imagine_ahead(post)
+      imag_feat = self._imagine_ahead(post, data['desc'])
       reward = self._reward(imag_feat).mode()
       if self._c.pcont:
         pcont = self._pcont(imag_feat).mean()
@@ -339,6 +341,8 @@ class Dreamer(tools.Module):
         amount *= 0.5 ** (tf.cast(self._step, tf.float32) / self._c.expl_decay)
       if self._c.expl_min:
         amount = tf.maximum(self._c.expl_min, amount)
+      #FIXME:amount should be 0.5
+      print(f'expl_amount {amount}')
       self._metrics['expl_amount'].update_state(amount)
     elif self._c.eval_noise:
       amount = self._c.eval_noise
@@ -362,18 +366,22 @@ class Dreamer(tools.Module):
           action)
     raise NotImplementedError(self._c.expl)
 
-  def _imagine_ahead(self, post):
+  def _imagine_ahead(self, post, desc):
     #imagine some steps
-    #TODO: add desc
     if self._c.pcont:  # Last step could be terminal.
       post = {k: v[:, :-1] for k, v in post.items()}
+    #desc should be in post
     flatten = lambda x: tf.reshape(x, [-1] + list(x.shape[2:]))
     start = {k: flatten(v) for k, v in post.items()}
+    desc = flatten(desc)
+    #add desc to start
     policy = lambda state: self._actor(
         tf.stop_gradient(self._dynamics.get_feat(state))).sample()
-    states = tools.static_scan(
-        lambda prev, _: self._dynamics.img_step(prev, policy(prev)),
-        tf.range(self._c.horizon), start)
+    #FIXME:add desc here
+    #prev_state, prev_action, desc
+    states,_ = tools.static_scan(
+        lambda prev, _: self._dynamics.img_step(prev[0], policy(prev[0]),prev[1]),
+        tf.range(self._c.horizon), (start,desc))
     imag_feat = self._dynamics.get_feat(states)
     return imag_feat
 
@@ -395,12 +403,16 @@ class Dreamer(tools.Module):
     self._metrics['action_ent'].update_state(self._actor(feat).entropy())
 
   def image_summaries(self, data, embed, image_pred):
+    #NOTE:add desc
     truth = data['image'][:6] + 0.5
     recon = image_pred.mode()[:6]
-    init, _ = self._dynamics.observe(embed[:6, :5], data['action'][:6, :5])
+    init, _ = self._dynamics.observe(embed[:6, :5], data['action'][:6, :5], data['desc'][:6,:5])
+    #NOTE:post of first 5 frames
     init = {k: v[:, -1] for k, v in init.items()}
-    prior = self._dynamics.imagine(data['action'][:6, 5:], init)
+    prior = self._dynamics.imagine(data['action'][:6, 5:], data['desc'][:6,5:],init)
+    #imagine a state sequence
     openl = self._decode(self._dynamics.get_feat(prior)).mode()
+    #NOTE:predict else
     model = tf.concat([recon[:, :5] + 0.5, openl + 0.5], 1)
     error = (model - truth + 1) / 2
     openl = tf.concat([truth, model, error], 2)
@@ -541,13 +553,13 @@ def main(config):
       str(config.logdir), max_queue=1000, flush_millis=20000)
   writer.set_as_default()
   #NOTE:CHANGE:generate random envs
-  train_models, test_models = generate_models(num_models = 10)
+  train_models, test_models = generate_models(num_models = 50)
   train_envs = [wrappers.Async(lambda: make_gridworld_env(
       config, writer, 'train', datadir, store=True, desc=desc2dict(desc)), config.parallel)
-      for desc in train_models]
+      for desc in train_models[:1]]
   test_envs = [wrappers.Async(lambda: make_gridworld_env(
       config, writer, 'test', datadir, store=False, desc=desc2dict(desc)), config.parallel)
-      for desc in test_models]
+      for desc in train_models[:1]]
   #******************
   # train_envs = [wrappers.Async(lambda: make_env(
   #     config, writer, 'train', datadir, store=True), config.parallel)

@@ -5,3 +5,4 @@ __pycache__/
 ./logdir/
 *.npz
 MUJOCO_LOG.TXT
+log*

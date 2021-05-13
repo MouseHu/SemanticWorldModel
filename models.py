@@ -8,9 +8,8 @@ import tools
 
 '''
 FIXME：
-保险起见，给所有的model都加one-hot vector作为输入.
 之后看看能不能用FiLM layer.
-目前暂时是给encoder input加了.
+暂时是给dynamics加了
 '''
 class RSSM(tools.Module):
 
@@ -32,31 +31,36 @@ class RSSM(tools.Module):
         deter=self._cell.get_initial_state(None, batch_size, dtype))
 
   @tf.function
-  def observe(self, embed, action, state=None):
-    #TODO:add desc
+  def observe(self, embed, action, desc=None, state=None):
+    #NOTE:add desc
+    #:param: desc: (batch,length,desc_len)
+    #:param: embed: (batch,length,hidden)
     if state is None:
       state = self.initial(tf.shape(action)[0])
-    #print(embed.shape)(6,5,1024)
     #print(action.shape)(6,5,6)
-    #print(action.shape)(25,20)
     embed = tf.transpose(embed, [1, 0, 2])
     action = tf.transpose(action, [1, 0, 2])
+    desc = tf.transpose(desc, [1, 0, 2])
     post, prior = tools.static_scan(
         lambda prev, inputs: self.obs_step(prev[0], *inputs),
-        (action, embed), (state, state))
+        (action, embed, desc), (state, state))
     post = {k: tf.transpose(v, [1, 0, 2]) for k, v in post.items()}
     prior = {k: tf.transpose(v, [1, 0, 2]) for k, v in prior.items()}
+    
     return post, prior
 
   @tf.function
-  def imagine(self, action, state=None):
-    #TODO:add desc
+  def imagine(self, action, desc=None,state=None):
+    #:param: desc:(batch,length,desc)(6,5,17)
+    #NOTE:add desc
     #生成一串state的trajectory
     if state is None:
       state = self.initial(tf.shape(action)[0])
     assert isinstance(state, dict), state
     action = tf.transpose(action, [1, 0, 2])
-    prior = tools.static_scan(self.img_step, action, state)
+    desc = tf.transpose(desc, [1, 0, 2])
+    prior,_ = tools.static_scan(lambda prev, inputs: self.img_step(prev[0],*inputs),
+     (action, desc), (state, None))
     prior = {k: tf.transpose(v, [1, 0, 2]) for k, v in prior.items()}
     return prior
 
@@ -67,25 +71,30 @@ class RSSM(tools.Module):
     return tfd.MultivariateNormalDiag(state['mean'], state['std'])
 
   @tf.function
-  def obs_step(self, prev_state, prev_action, embed):
-    #TODO:add desc
-    # embed of observation
-    prior = self.img_step(prev_state, prev_action)
+  def obs_step(self, prev_state, prev_action, embed, desc):
+    #:param :action:(batch,dim)
+    #NOTE:add desc
+    prior,_= self.img_step(prev_state, prev_action, desc)
     #post=q(s|o,a)
-    x = tf.concat([prior['deter'], embed], -1)
+    x = tf.concat([prior['deter'], embed, desc], -1)
     x = self.get('obs1', tfkl.Dense, self._hidden_size, self._activation)(x)
     x = self.get('obs2', tfkl.Dense, 2 * self._stoch_size, None)(x)
     mean, std = tf.split(x, 2, -1)
     std = tf.nn.softplus(std) + 0.1
     stoch = self.get_dist({'mean': mean, 'std': std}).sample()
     post = {'mean': mean, 'std': std, 'stoch': stoch, 'deter': prior['deter']}
+    #print(post)(batch,dim)
+    #print(prior)(batch,dim)
     return post, prior
 
   @tf.function
-  def img_step(self, prev_state, prev_action):
-    #TODO: add desc
+  def img_step(self, prev_state, prev_action, desc):
+    #:param :action:(batch,dim)
+    #:param :desc:(batch, desc_len)
+    #NOTE:add desc
+    #print(desc)(batch,dim)
     #prior=p(st|st-1,a)
-    x = tf.concat([prev_state['stoch'], prev_action], -1)
+    x = tf.concat([prev_state['stoch'], prev_action, desc], -1)
     x = self.get('img1', tfkl.Dense, self._hidden_size, self._activation)(x)
     x, deter = self._cell(x, [prev_state['deter']])
     deter = deter[0]  # Keras wraps the state in a list.
@@ -95,18 +104,18 @@ class RSSM(tools.Module):
     std = tf.nn.softplus(std) + 0.1
     stoch = self.get_dist({'mean': mean, 'std': std}).sample()
     prior = {'mean': mean, 'std': std, 'stoch': stoch, 'deter': deter}
-    return prior
+    #print(prior)(25,30)
+    return prior,desc
 
 
 class ConvEncoder(tools.Module):
-  #NOTE:CHANEG:hardcode desc_len
-  def __init__(self, depth=32, act=tf.nn.relu, desc_len = 17):
+  #NOTE:CHANEG:remove desc
+  def __init__(self, depth=32, act=tf.nn.relu, desc_len = None):
     self._act = act
     self._depth = depth
     self._desc_len = desc_len
 
   def __call__(self, obs):
-    #NOTE: add desc
     kwargs = dict(strides=2, activation=self._act)
     if self._desc_len:
       desc = obs['desc']
@@ -117,7 +126,7 @@ class ConvEncoder(tools.Module):
     x = self.get('h2', tfkl.Conv2D, 2 * self._depth, 4, **kwargs)(x)
     x = self.get('h3', tfkl.Conv2D, 4 * self._depth, 4, **kwargs)(x)
     x = self.get('h4', tfkl.Conv2D, 8 * self._depth, 4, **kwargs)(x)
-    
+    x = tf.reshape(x,(-1,4*4*256))
     #print(x.shape)(1250,2,2,256)
     if self._desc_len:
       #(-1,4,4,256)
@@ -125,7 +134,8 @@ class ConvEncoder(tools.Module):
       desc_flatten = tf.reshape(desc, (-1, desc.shape[-1])) 
       x = tf.concat([x_flatten, desc_flatten], -1)
       x = self.get('h5', tfkl.Dense, 32 * self._depth, self._act)(x)
-      x = self.get('h6', tfkl.Dense, 32 * self._depth, None)(x)
+
+    x = self.get('h6', tfkl.Dense, 32 * self._depth, None)(x)
     shape = tf.concat([tf.shape(obs['image'])[:-3], [32 * self._depth]], 0)
     x = tf.reshape(x, shape)
     #(25,50,1024)
