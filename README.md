@@ -1,4 +1,4 @@
-# Dream to Control
+~~~~# Dream to Control
 
 **NOTE:** Check out the code for [DreamerV2](https://github.com/danijar/dreamerv2), which supports both Atari and DMControl environments.
 

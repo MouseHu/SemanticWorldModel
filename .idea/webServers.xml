@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="ed0c3b97-829f-497b-9c26-5f6794f28f8e" name="160" url="http://101.6.98.112">
+        <fileTransfer rootFolder="/home/hh" accessType="SFTP" host="101.6.98.112" port="6022" sshConfigId="1a5b2210-32b3-497f-961c-8a95f4efe521" sshConfig="hh@101.6.98.112:6022 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+      <webServer id="68a03e1a-0097-415e-95bc-37639718b2ce" name="130" url="http://130">
+        <fileTransfer rootFolder="/home/hh" accessType="SFTP" host="101.6.96.130" port="6022" sshConfigId="41a49cf2-c8e5-4757-b25e-854668689f6b" sshConfig="hh@101.6.96.130:6022 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+    <groups>
+      <group>
+        <name>MIG</name>
+        <servers>
+          <name value="160" />
+          <name value="130" />
+        </servers>
+      </group>
+    </groups>
+  </component>
+</project>
