@@ -65,7 +65,7 @@ def define_config():
     config.weight_decay_pattern = r'.*'
     # Training.
     config.batch_size = 32
-    config.batch_length = 16
+    config.batch_length = 8
     config.train_every = 1000
     config.train_steps = 100
     config.pretrain = 100
@@ -272,6 +272,7 @@ class Dreamer(tools.Module):
         if self._c.pcont:
             model_modules.append(self._pcont)
         if self._c.cpc:
+            print("Using CPC Loss")
             self._cpc_pred = models.DenseDecoder((self._c.cpc_latent_size,), self._c.cpc_num_layers,
                                                  self._c.cpc_num_units)
             # model_modules.append(self._pcont)
