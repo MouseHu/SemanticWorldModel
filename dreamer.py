@@ -6,7 +6,7 @@ import os
 import pathlib
 import sys
 import time
-
+os.environ["CUDA_VISIBLE_DEVICES"] = '7'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['MUJOCO_GL'] = 'egl'
 
@@ -14,7 +14,6 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.mixed_precision import experimental as prec
 from gridworld.collect_data import generate_models, desc2dict
-
 tf.get_logger().setLevel('ERROR')
 
 from tensorflow_probability import distributions as tfd
@@ -59,7 +58,7 @@ def define_config():
     config.cnn_depth = 32
     config.pcont = True
     config.free_nats = 3.0
-    config.kl_scale = 1.0
+    config.kl_scale = 2.0#NOTE:TUNE
     config.pcont_scale = 10.0
     config.weight_decay = 0.0
     config.weight_decay_pattern = r'.*'
@@ -128,8 +127,17 @@ class Dreamer(tools.Module):
             self._dataset = iter(self._strategy.experimental_distribute_dataset(
                 load_dataset(datadir, self._c)))
             self._build_model()
+        print(f'model_lr:{self._c.model_lr}')
+        print(f'actor_lr:{self._c.actor_lr}')
+        print(f'value_lr:{self._c.value_lr}')
+        print(f'grad_clip:{self._c.grad_clip}')
+        print(f'batch_size:{self._c.batch_size}')
+        print(f'deter_size:{self._c.deter_size}')
+        print(f'stoch_size:{self._c.stoch_size}')
+        print(f'kl_scale:{self._c.kl_scale}')
 
     def __call__(self, obs, reset, state=None, training=True):
+        #:param obs: dicts of lists
         step = self._step.numpy().item()
         tf.summary.experimental.set_step(step)
         if state is not None and reset.any():
@@ -143,6 +151,8 @@ class Dreamer(tools.Module):
                 for train_step in range(n):
                     log_images = self._c.log_images and log and train_step == 0
                     self.train(next(self._dataset), log_images)
+                for _ in range(2*n):
+                    self.train_model(next(self._dataset))
             if log:
                 self._write_summaries()
         action, state = self.policy(obs, state, training)
@@ -158,7 +168,8 @@ class Dreamer(tools.Module):
         else:
             latent, action = state
         embed = self._encode(preprocess(obs, self._c))
-        latent, _ = self._dynamics.obs_step(latent, action, embed)
+        #NOTE:ADDDESC
+        latent, _ = self._dynamics.obs_step(latent, action, embed, obs['desc'])
         feat = self._dynamics.get_feat(latent)
         if training:
             action = self._actor(feat).sample()
@@ -180,7 +191,7 @@ class Dreamer(tools.Module):
         with tf.GradientTape() as model_tape:
             embed = self._encode(data)
             # print(embed,data['action'])
-            post, prior = self._dynamics.observe(embed, data['action'])
+            post, prior = self._dynamics.observe(embed, data['action'], data['desc'])
             feat = self._dynamics.get_feat(post)
             image_pred = self._decode(feat)
             reward_pred = self._reward(feat)
@@ -209,7 +220,8 @@ class Dreamer(tools.Module):
             model_loss /= float(self._strategy.num_replicas_in_sync)
 
         with tf.GradientTape() as actor_tape:
-            imag_feat = self._imagine_ahead(post)
+            #NOTE:ADDDESC
+            imag_feat = self._imagine_ahead(post, data['desc'])
             reward = self._reward(imag_feat).mode()
             if self._c.pcont:
                 pcont = self._pcont(imag_feat).mean()
@@ -242,6 +254,42 @@ class Dreamer(tools.Module):
                     actor_norm)
             if tf.equal(log_images, True):
                 self._image_summaries(data, embed, image_pred)
+    @tf.function()
+    def train_model(self, data): 
+        self._strategy.experimental_run_v2(self._train_model, args=(data, ))
+
+    def _train_model(self, data):
+        with tf.GradientTape() as model_tape:
+            embed = self._encode(data)
+            # print(embed,data['action'])
+            post, prior = self._dynamics.observe(embed, data['action'], data['desc'])
+            feat = self._dynamics.get_feat(post)
+            image_pred = self._decode(feat)
+            reward_pred = self._reward(feat)
+            likes = tools.AttrDict()
+            if self._c.cpc:
+                # print("using cpc")
+                pred = self._cpc_pred(embed)
+                # print(pred,feat)
+                cpc_loss = -1. * tf.math.reduce_mean(tools.compute_cpc_loss(pred, feat, self._c))  # caution!
+                model_loss = cpc_loss
+            else:
+                model_loss = cpc_loss = 0
+                likes.image = tf.reduce_mean(image_pred.log_prob(data['image']))
+            likes.reward = tf.reduce_mean(reward_pred.log_prob(data['reward']))
+            if self._c.pcont:
+                pcont_pred = self._pcont(feat)
+                pcont_target = self._c.discount * data['discount']
+                likes.pcont = tf.reduce_mean(pcont_pred.log_prob(pcont_target))
+                likes.pcont *= self._c.pcont_scale
+            prior_dist = self._dynamics.get_dist(prior)
+            post_dist = self._dynamics.get_dist(post)
+            div = tf.reduce_mean(tfd.kl_divergence(post_dist, prior_dist))
+            div = tf.maximum(div, self._c.free_nats)
+            # model_loss = self._c.kl_scale * div - sum(likes.values())
+            model_loss += self._c.kl_scale * div - sum(likes.values())
+            model_loss /= float(self._strategy.num_replicas_in_sync)
+        model_norm = self._model_opt(model_tape, model_loss)
 
     def _build_model(self):
         acts = dict(
@@ -305,22 +353,38 @@ class Dreamer(tools.Module):
             return tf.random.uniform(action.shape, -1, 1)
         if self._c.expl == 'epsilon_greedy':
             indices = tfd.Categorical(0 * action).sample()
+            rnd = tf.random.uniform(action.shape[:1], 0, 1) < amount
+            rnd = tf.expand_dims(rnd, axis=-1)
+            one_hot = tf.one_hot(indices, action.shape[-1], dtype=self._float)
             return tf.where(
-                tf.random.uniform(action.shape[:1], 0, 1) < amount,
-                tf.one_hot(indices, action.shape[-1], dtype=self._float),
-                action)
+            tf.repeat(rnd, 4, axis =-1),
+            one_hot,
+            action)
+            # return tf.where(
+            #     tf.random.uniform(action.shape[:1], 0, 1) < amount,
+            #     tf.one_hot(indices, action.shape[-1], dtype=self._float),
+            #     action)
         raise NotImplementedError(self._c.expl)
 
-    def _imagine_ahead(self, post):
+    def _imagine_ahead(self, post, desc):
         if self._c.pcont:  # Last step could be terminal.
             post = {k: v[:, :-1] for k, v in post.items()}
+            desc = desc[:,:-1]
         flatten = lambda x: tf.reshape(x, [-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in post.items()}
+        desc = flatten(desc)
         policy = lambda state: self._actor(
             tf.stop_gradient(self._dynamics.get_feat(state))).sample()
+        '''
         states = tools.static_scan(
             lambda prev, _: self._dynamics.img_step(prev, policy(prev)),
             tf.range(self._c.horizon), start)
+        '''
+        #NOTE:ADDDESC
+        #prev_state, prev_action, desc
+        states,_ = tools.static_scan(
+        lambda prev, _: self._dynamics.img_step(prev[0], policy(prev[0]),prev[1]),
+        tf.range(self._c.horizon), (start,desc))
         imag_feat = self._dynamics.get_feat(states)
         return imag_feat
 
@@ -347,9 +411,11 @@ class Dreamer(tools.Module):
     def _image_summaries(self, data, embed, image_pred):
         truth = data['image'][:6] + 0.5
         recon = image_pred.mode()[:6]
-        init, _ = self._dynamics.observe(embed[:6, :5], data['action'][:6, :5])
+        init, _ = self._dynamics.observe(embed[:6, :5], data['action'][:6, :5],\
+         data['desc'][:6,:5])
         init = {k: v[:, -1] for k, v in init.items()}
-        prior = self._dynamics.imagine(data['action'][:6, 5:], init)
+        prior = self._dynamics.imagine(data['action'][:6, 5:],data['desc'][:6,5:],\
+         init)
         openl = self._decode(self._dynamics.get_feat(prior)).mode()
         model = tf.concat([recon[:, :5] + 0.5, openl + 0.5], 1)
         error = (model - truth + 1) / 2
@@ -491,15 +557,15 @@ def main(config):
     # test_envs = [wrappers.Async(lambda: make_env(
     #     config, writer, 'test', datadir, store=False), config.parallel)
     #              for _ in range(config.envs)]
-    train_models, test_models = generate_models(num_models=1)
+    train_models, test_models = generate_models(num_models=20)
     print(train_models)
     print(test_models)
     train_envs = [wrappers.Async(lambda: make_gridworld_env(
         config, writer, 'train', datadir, store=True, desc=desc2dict(desc)), config.parallel)
-                  for desc in train_models[:1]]
+                  for desc in train_models]
     test_envs = [wrappers.Async(lambda: make_gridworld_env(
         config, writer, 'test', datadir, store=False, desc=desc2dict(desc)), config.parallel)
-                 for desc in train_models[:1]]
+                 for desc in train_models]
     actspace = train_envs[0].action_space
 
     # Prefill dataset with random episodes.

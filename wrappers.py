@@ -41,7 +41,7 @@ class DeepMindControl:
     @property
     def action_space(self):
         spec = self._env.action_spec()
-        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
+        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float16)
 
     def step(self, action):
         time_step = self._env.step(action)
@@ -49,7 +49,7 @@ class DeepMindControl:
         obs['image'] = self.render()
         reward = time_step.reward or 0
         done = time_step.last()
-        info = {'discount': np.array(time_step.discount, np.float32)}
+        info = {'discount': np.array(time_step.discount, np.float16)}
         return obs, reward, done, info
 
     def reset(self):
@@ -209,8 +209,8 @@ class GridWorld:
         with self.LOCK:
             self._env = ImageInputWarpper(FourroomsWaterNorender(Model=desc,num_coins=0, num_waters=0))
             # self._env = ImageInputWarpper(FourroomsWaterNorender(Model=desc))
-            # self._desc_onehot = model_to_onehot(desc).astype(np.float16)
-            self._desc_onehot = model_to_onehot(desc).astype(np.float32)
+            self._desc_onehot = model_to_onehot(desc).astype(np.float16)
+            #self._desc_onehot = model_to_onehot(desc).astype(np.float32)
             self._size = size
         self._random = np.random.RandomState(seed=None)
 
@@ -218,8 +218,8 @@ class GridWorld:
     def observation_space(self):
         shape = self._size + (3)
         space = gym.spaces.Box(low=0, high=255, shape=shape, dtype=np.uint8)
-        # space_desc = gym.spaces.Box(low=0, high=1, shape=len(self._desc), dtype=np.float16)
-        space_desc = gym.spaces.Box(low=0, high=1, shape=len(self._desc), dtype=np.float32)
+        space_desc = gym.spaces.Box(low=0, high=1, shape=len(self._desc), dtype=np.float16)
+        #space_desc = gym.spaces.Box(low=0, high=1, shape=len(self._desc), dtype=np.float32)
         # NOTE:observation_space should be dict
         return gym.spaces.Dict({'image': space, 'desc': space_desc})
 

@@ -200,7 +200,13 @@ class FourroomsBase(gym.Env):
         else:
             # print("Not resetting goal")
             goal = self.goal
-        init_states.remove(goal)
+        try:
+            init_states.remove(goal)
+        except Exception as e:
+            print(init_states)
+            print(goal)
+            print(e)
+            
         init_position = np.random.choice(init_states)
 
         self.state = FourroomsBaseState(position_n=init_position, current_steps=0, goal_n=goal, done=False,

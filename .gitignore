@@ -3,4 +3,6 @@ __pycache__/
 *.egg-info
 ./dist
 ./logdir
+logdir/
 MUJOCO_LOG.TXT
+*.txt
