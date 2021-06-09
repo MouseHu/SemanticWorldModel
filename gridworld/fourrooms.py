@@ -196,7 +196,7 @@ class FourroomsBase(gym.Env):
             print("resetting goal")
             goal = np.random.choice(init_states)
             self.goal=goal
-            # print("goal",goal)
+            print("goal",goal)
         else:
             # print("Not resetting goal")
             goal = self.goal
@@ -206,8 +206,9 @@ class FourroomsBase(gym.Env):
             print(init_states)
             print(goal)
             print(e)
-            
+        #np.random.seed(int(time.time()))
         init_position = np.random.choice(init_states)
+        #print(f'setting init:{init_position}')
 
         self.state = FourroomsBaseState(position_n=init_position, current_steps=0, goal_n=goal, done=False,
                                         num_pos=self.num_pos)

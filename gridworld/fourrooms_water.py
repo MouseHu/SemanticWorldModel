@@ -84,7 +84,9 @@ class FourroomsWaterState(FourroomsCoinState):
 
 class FourroomsWater(FourroomsCoinNorender):
     def __init__(self, Model=None, max_epilen=200, goal=None, num_coins=3, num_waters=3, seed=0):
+        
         super(FourroomsCoin, self).__init__(max_epilen, goal, seed)
+        self._seed = seed
         self.num_waters = num_waters
         assert self.num_pos > (self.num_waters + 10), "too many waters."
         self.num_coins = num_coins
@@ -132,6 +134,7 @@ class FourroomsWater(FourroomsCoinNorender):
 
     def reset(self):
         # reset water_list, init_states, occupancy
+        #np.random.seed(self._seed)
         self.init_states = deepcopy(self.init_states_ori)
         self.occupancy = deepcopy(self.occupancy_ori)
         water_list = np.array([], dtype=int)
@@ -142,6 +145,7 @@ class FourroomsWater(FourroomsCoinNorender):
                     water = None
                     break
                 water = np.random.choice(state_list)
+                #print(f"setting water: {water}")
                 state_list.remove(water)
                 if self.not_block(water):
                     break
@@ -323,6 +327,7 @@ class FourroomsWaterNorender(FourroomsWater):
 
 if __name__ == '__main__':
     env = ImageInputWarpper(FourroomsWaterNorender())
+    print(env.env.state)
     check_render(env)
     check_run(env)
     print("Basic check finished.")

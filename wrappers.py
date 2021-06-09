@@ -207,7 +207,7 @@ class GridWorld:
     def __init__(self, desc: dict, size=(104, 104)):
         # NOTE: size is mannually specified.
         with self.LOCK:
-            self._env = ImageInputWarpper(FourroomsWaterNorender(Model=desc,num_coins=0, num_waters=0))
+            self._env = ImageInputWarpper(FourroomsWaterNorender(Model=desc, num_coins=6, num_waters=0))
             # self._env = ImageInputWarpper(FourroomsWaterNorender(Model=desc))
             self._desc_onehot = model_to_onehot(desc).astype(np.float16)
             #self._desc_onehot = model_to_onehot(desc).astype(np.float32)

@@ -6,10 +6,11 @@ import os
 import pathlib
 import sys
 import time
+import datetime
 os.environ["CUDA_VISIBLE_DEVICES"] = '7'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['MUJOCO_GL'] = 'egl'
-
+print('dreamer:\t' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.mixed_precision import experimental as prec
@@ -44,27 +45,27 @@ def define_config():
     config.action_repeat = 1
     config.time_limit = 200
     config.prefill = 5000
-    config.eval_noise = 0.05
+    config.eval_noise = 0
     config.clip_rewards = 'none'
     # Model.
     # config.deter_size = 200
     # config.stoch_size = 30
     # config.num_units = 400
-    config.deter_size = 16
-    config.stoch_size = 16
-    config.num_units = 256
+    config.deter_size = 64#16
+    config.stoch_size = 32#16
+    config.num_units = 512#256
     config.dense_act = 'elu'
     config.cnn_act = 'relu'
     config.cnn_depth = 32
     config.pcont = True
     config.free_nats = 3.0
-    config.kl_scale = 2.0#NOTE:TUNE
+    config.kl_scale = 3.0#NOTE:TUNE
     config.pcont_scale = 10.0
     config.weight_decay = 0.0
     config.weight_decay_pattern = r'.*'
     # Training.
     config.batch_size = 32
-    config.batch_length = 8
+    config.batch_length = 8#tune
     config.train_every = 1000
     config.train_steps = 100
     config.pretrain = 100
@@ -89,11 +90,11 @@ def define_config():
     config.expl = 'epsilon_greedy'
     config.expl_amount = 0.3
 
-    config.expl_decay = 1e5
+    config.expl_decay = 6e5#1e5
     config.expl_min = 0.05
 
     # add by haohu
-    config.cpc = False
+    config.cpc = True
     config.cpc_num_units = 64
     config.cpc_latent_size = config.stoch_size + config.deter_size
     config.cpc_num_layers = 3
@@ -123,6 +124,7 @@ class Dreamer(tools.Module):
         self._metrics['expl_amount']  # Create variable for checkpoint.
         self._float = prec.global_policy().compute_dtype
         self._strategy = tf.distribute.MirroredStrategy()
+        self.datadir =  datadir
         with self._strategy.scope():
             self._dataset = iter(self._strategy.experimental_distribute_dataset(
                 load_dataset(datadir, self._c)))
@@ -135,19 +137,25 @@ class Dreamer(tools.Module):
         print(f'deter_size:{self._c.deter_size}')
         print(f'stoch_size:{self._c.stoch_size}')
         print(f'kl_scale:{self._c.kl_scale}')
+        print(f'expl_decay:{self._c.expl_decay}')
 
     def __call__(self, obs, reset, state=None, training=True):
         #:param obs: dicts of lists
+        #This step is the number of excution for __call__.
         step = self._step.numpy().item()
+        #episode_step = count_steps(self.datadir, self._c)
+        #print(f"step:{step}, episode step:{episode_step}") align
         tf.summary.experimental.set_step(step)
         if state is not None and reset.any():
             mask = tf.cast(1 - reset, self._float)[:, None]
             state = tf.nest.map_structure(lambda x: x * mask, state)
         if self._should_train(step):
+            #1. should train 2.test
             log = self._should_log(step)
             n = self._c.pretrain if self._should_pretrain() else self._c.train_steps
             print(f'Training for {n} steps.')
             with self._strategy.scope():
+                #print(f'strategy, step set to {tf.summary.experimental.get_step()}') correct here
                 for train_step in range(n):
                     log_images = self._c.log_images and log and train_step == 0
                     self.train(next(self._dataset), log_images)
@@ -188,6 +196,7 @@ class Dreamer(tools.Module):
         self._strategy.experimental_run_v2(self._train, args=(data, log_images))
 
     def _train(self, data, log_images):
+        #tf.print(f'in_train, step set to {tf.summary.experimental.get_step()}')#get a problem here
         with tf.GradientTape() as model_tape:
             embed = self._encode(data)
             # print(embed,data['action'])
@@ -253,6 +262,7 @@ class Dreamer(tools.Module):
                     model_loss, value_loss, actor_loss, model_norm, value_norm,
                     actor_norm)
             if tf.equal(log_images, True):
+                #not tf.function will only be excuted once.
                 self._image_summaries(data, embed, image_pred)
     @tf.function()
     def train_model(self, data): 
@@ -314,7 +324,7 @@ class Dreamer(tools.Module):
                 (), 2, self._c.num_units, 'binary', act=act)
         self._value = models.DenseDecoder((), 2, self._c.num_units, act=act)
         self._actor = models.ActionDecoder(
-            self._actdim, 2, self._c.num_units, self._c.action_dist,
+            self._actdim, 4, self._c.num_units, self._c.action_dist,
             init_std=self._c.action_init_std, act=act)
         model_modules = [self._encode, self._dynamics, self._decode, self._reward]
         if self._c.pcont:
@@ -409,6 +419,8 @@ class Dreamer(tools.Module):
         self._metrics['action_ent'].update_state(self._actor(feat).entropy())
 
     def _image_summaries(self, data, embed, image_pred):
+        
+        #tf.print(f"writing image summary,current step:{tf.summary.experimental.get_step()}")
         truth = data['image'][:6] + 0.5
         recon = image_pred.mode()[:6]
         init, _ = self._dynamics.observe(embed[:6, :5], data['action'][:6, :5],\
@@ -420,8 +432,16 @@ class Dreamer(tools.Module):
         model = tf.concat([recon[:, :5] + 0.5, openl + 0.5], 1)
         error = (model - truth + 1) / 2
         openl = tf.concat([truth, model, error], 2)
-        tools.graph_summary(
-            self._writer, tools.video_summary, 'agent/openl', openl)
+        #inside tf.function?
+        def inner(*args):
+            tf.summary.experimental.set_step(self._step.numpy().item())
+            with self._writer.as_default():
+                tools.video_summary(*args)
+        tf.numpy_function(inner, ['agent/openl', openl],[])
+        #tools.graph_summary(
+        #    self._writer, tools.video_summary, 'agent/openl', openl)
+        #似乎不是这里的问题。
+        self._writer.flush()
 
     def _write_summaries(self):
         step = int(self._step.numpy())
@@ -479,6 +499,7 @@ def summarize_episode(episode, config, datadir, writer, prefix):
         (f'{prefix}/return', float(episode['reward'].sum())),
         (f'{prefix}/length', len(episode['reward']) - 1),
         (f'episodes', episodes)]
+    #Here the step is the number of real interactions.
     step = count_steps(datadir, config)
     with (config.logdir / 'metrics.jsonl').open('a') as f:
         f.write(json.dumps(dict([('step', step)] + metrics)) + '\n')
@@ -549,7 +570,7 @@ def main(config):
     # Create environments.
     datadir = config.logdir / 'episodes'
     writer = tf.summary.create_file_writer(
-        str(config.logdir), max_queue=1000, flush_millis=20000)
+        str(config.logdir), max_queue=100, flush_millis=20000)
     writer.set_as_default()
     # train_envs = [wrappers.Async(lambda: make_env(
     #     config, writer, 'train', datadir, store=True), config.parallel)
@@ -557,15 +578,15 @@ def main(config):
     # test_envs = [wrappers.Async(lambda: make_env(
     #     config, writer, 'test', datadir, store=False), config.parallel)
     #              for _ in range(config.envs)]
-    train_models, test_models = generate_models(num_models=20)
+    train_models, test_models = generate_models(num_models=1)
     print(train_models)
     print(test_models)
     train_envs = [wrappers.Async(lambda: make_gridworld_env(
         config, writer, 'train', datadir, store=True, desc=desc2dict(desc)), config.parallel)
-                  for desc in train_models]
+                  for desc in train_models[:1]]
     test_envs = [wrappers.Async(lambda: make_gridworld_env(
         config, writer, 'test', datadir, store=False, desc=desc2dict(desc)), config.parallel)
-                 for desc in train_models]
+                 for desc in train_models[:1]]
     actspace = train_envs[0].action_space
 
     # Prefill dataset with random episodes.
@@ -587,7 +608,7 @@ def main(config):
     while step < config.steps:
         print('Start evaluation.')
         tools.simulate(
-            functools.partial(agent, training=False), test_envs, episodes=1)
+            functools.partial(agent, training=False), test_envs, episodes=10)
         writer.flush()
         print('Start collection.')
         steps = config.eval_every // config.action_repeat

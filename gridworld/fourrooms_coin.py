@@ -107,10 +107,12 @@ class FourroomsCoin(FourroomsNorender):
         # 这里为了兼容留下了random coin，实际上没有用
 
         super(FourroomsCoin, self).__init__(max_epilen, goal, seed=seed)
+        self._seed = seed
         self.num_coins = num_coins
         assert self.num_pos > (num_coins + 5), "too many coins"
         self.observation_space = spaces.Discrete(self.num_pos * (2 ** num_coins))
         coin_list = np.random.choice(self.init_states, num_coins, replace=False)
+
         if num_coins > 0:
             self.have_coin = True
         # You can change the value of coin here
@@ -169,7 +171,10 @@ class FourroomsCoin(FourroomsNorender):
             init_states.remove(self.state.goal_n)
         if self.state.position_n in init_states:
             init_states.remove(self.state.position_n)
+        #np.random.seed(self._seed)
         coin_list = np.random.choice(init_states, self.num_coins, replace=False)
+        #print("resetting coins")
+        #print(coin_list)
         coin_dict = {coin: (1, True) for coin in coin_list}
 
         self.state.coin_dict = coin_dict
